@@ -16,12 +16,13 @@ package jet
 
 import (
 	"fmt"
-	"github.com/CloudyKit/fastprinter"
 	"io"
 	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
+
+	"github.com/CloudyKit/fastprinter"
 )
 
 var (
@@ -251,7 +252,7 @@ func (st *Runtime) executeSet(left Expression, right reflect.Value) {
 	}
 	lef := len(fields) - 1
 	for i := 0; i < lef; i++ {
-		value = getFieldOrMethodValue(fields[i], value)
+		value = getValue(fields[i], value)
 		if !value.IsValid() {
 			left.errorf("identifier %q is not available in the current scope", fields[i])
 		}
@@ -573,7 +574,7 @@ func (st *Runtime) evalPrimaryExpressionGroup(node Expression) reflect.Value {
 		node := node.(*CallExprNode)
 		baseExpr := st.evalBaseExpressionGroup(node.BaseExpr)
 		if baseExpr.Kind() != reflect.Func {
-			node.errorf("node %q is not func kind %q", node.BaseExpr, baseExpr.Type())
+			node.errorf("node %q is not func", node)
 		}
 		return st.evalCallExpression(baseExpr, node.Args)
 	case NodeIndexExpr:
@@ -583,12 +584,11 @@ func (st *Runtime) evalPrimaryExpressionGroup(node Expression) reflect.Value {
 		indexExpression := st.evalPrimaryExpressionGroup(node.Index)
 		indexType := indexExpression.Type()
 
-		if baseExpression.Kind() == reflect.Interface {
-			baseExpression = baseExpression.Elem()
-		}
-
 		if baseExpression.Kind() == reflect.Ptr {
 			baseExpression = baseExpression.Elem()
+		}
+		if baseExpression.Kind() == reflect.Interface {
+			baseExpression = reflect.ValueOf(baseExpression.Interface())
 		}
 
 		switch baseExpression.Kind() {
@@ -597,6 +597,14 @@ func (st *Runtime) evalPrimaryExpressionGroup(node Expression) reflect.Value {
 			if !indexType.AssignableTo(key) {
 				if indexType.ConvertibleTo(key) {
 					indexExpression = indexExpression.Convert(key)
+				} else if indexType.Kind() == reflect.Interface {
+					indexExpression = reflect.ValueOf(indexExpression.Interface())
+					indexType = indexExpression.Type()
+					if indexType.ConvertibleTo(key) {
+						indexExpression = indexExpression.Convert(key)
+					} else {
+						node.errorf("%s is not assignable|convertible to map key %s", indexType.String(), key.String())
+					}
 				} else {
 					node.errorf("%s is not assignable|convertible to map key %s", indexType.String(), key.String())
 				}
@@ -612,7 +620,7 @@ func (st *Runtime) evalPrimaryExpressionGroup(node Expression) reflect.Value {
 			if canNumber(indexType.Kind()) {
 				return baseExpression.Field(int(castInt64(indexExpression)))
 			} else if indexType.Kind() == reflect.String {
-				return getFieldOrMethodValue(indexExpression.String(), baseExpression)
+				return getValue(indexExpression.String(), baseExpression)
 			} else {
 				node.errorf("non numeric value in index expression kind %s", baseExpression.Kind().String())
 			}
@@ -670,6 +678,9 @@ func (st *Runtime) isSet(node Node) bool {
 		if baseExpression.Kind() == reflect.Ptr {
 			baseExpression = baseExpression.Elem()
 		}
+		if baseExpression.Kind() == reflect.Interface {
+			baseExpression = reflect.ValueOf(baseExpression.Interface())
+		}
 
 		switch baseExpression.Kind() {
 		case reflect.Map:
@@ -677,6 +688,14 @@ func (st *Runtime) isSet(node Node) bool {
 			if !indexType.AssignableTo(key) {
 				if indexType.ConvertibleTo(key) {
 					indexExpression = indexExpression.Convert(key)
+				} else if indexType.Kind() == reflect.Interface {
+					indexExpression = reflect.ValueOf(indexExpression.Interface())
+					indexType = indexExpression.Type()
+					if indexType.ConvertibleTo(key) {
+						indexExpression = indexExpression.Convert(key)
+					} else {
+						node.errorf("%s is not! assignable|convertible to map key %s", indexType.String(), key.String())
+					}
 				} else {
 					node.errorf("%s is not assignable|convertible to map key %s", indexType.String(), key.String())
 				}
@@ -694,7 +713,7 @@ func (st *Runtime) isSet(node Node) bool {
 				i := int(castInt64(indexExpression))
 				return i >= 0 && i < baseExpression.NumField()
 			} else if indexType.Kind() == reflect.String {
-				return getFieldOrMethodValue(indexExpression.String(), baseExpression).IsValid()
+				return getValue(indexExpression.String(), baseExpression).IsValid()
 			} else {
 				node.errorf("non numeric value in index expression kind %s", baseExpression.Kind().String())
 			}
@@ -709,7 +728,7 @@ func (st *Runtime) isSet(node Node) bool {
 		node := node.(*FieldNode)
 		resolved := st.context
 		for i := 0; i < len(node.Ident); i++ {
-			resolved = getFieldOrMethodValue(node.Ident[i], resolved)
+			resolved = getValue(node.Ident[i], resolved)
 			if !resolved.IsValid() {
 				return false
 			}
@@ -721,7 +740,7 @@ func (st *Runtime) isSet(node Node) bool {
 			return false
 		}
 		for i := 0; i < len(node.Field); i++ {
-			value := getFieldOrMethodValue(node.Field[i], value)
+			value := getValue(node.Field[i], value)
 			if !value.IsValid() {
 				return false
 			}
@@ -1089,7 +1108,7 @@ func (st *Runtime) evalBaseExpressionGroup(node Node) reflect.Value {
 		node := node.(*FieldNode)
 		resolved := st.context
 		for i := 0; i < len(node.Ident); i++ {
-			fieldResolved := getFieldOrMethodValue(node.Ident[i], resolved)
+			fieldResolved := getValue(node.Ident[i], resolved)
 			if !fieldResolved.IsValid() {
 				node.errorf("there is no field or method %q in %s", node.Ident[i], getTypeString(resolved))
 			}
@@ -1100,7 +1119,7 @@ func (st *Runtime) evalBaseExpressionGroup(node Node) reflect.Value {
 		node := node.(*ChainNode)
 		var resolved = st.evalPrimaryExpressionGroup(node.Node)
 		for i := 0; i < len(node.Field); i++ {
-			fieldValue := getFieldOrMethodValue(node.Field[i], resolved)
+			fieldValue := getValue(node.Field[i], resolved)
 			if !fieldValue.IsValid() {
 				node.errorf("there is no field or method %q in %s", node.Field[i], getTypeString(resolved))
 			}
@@ -1435,16 +1454,8 @@ func castInt64(v reflect.Value) int64 {
 	return 0
 }
 
-var cachedStructsMutex = sync.RWMutex{}
-var cachedStructsFieldIndex = map[reflect.Type]map[string][]int{}
-
-func getFieldOrMethodValue(key string, v reflect.Value) reflect.Value {
-	value := getValue(key, v)
-	if value.Kind() == reflect.Interface {
-		value = value.Elem()
-	}
-	return value
-}
+var cacheStructMutex = sync.RWMutex{}
+var cacheStructFieldIndex = map[reflect.Type]map[string][]int{}
 
 func getValue(key string, v reflect.Value) reflect.Value {
 
@@ -1475,17 +1486,17 @@ func getValue(key string, v reflect.Value) reflect.Value {
 
 	if k == reflect.Struct {
 		typ := v.Type()
-		cachedStructsMutex.RLock()
-		cache, ok := cachedStructsFieldIndex[typ]
-		cachedStructsMutex.RUnlock()
+		cacheStructMutex.RLock()
+		cache, ok := cacheStructFieldIndex[typ]
+		cacheStructMutex.RUnlock()
 		if !ok {
-			cachedStructsMutex.Lock()
-			if cache, ok = cachedStructsFieldIndex[typ]; !ok {
+			cacheStructMutex.Lock()
+			if cache, ok = cacheStructFieldIndex[typ]; !ok {
 				cache = make(map[string][]int)
 				buildCache(typ, cache, nil)
-				cachedStructsFieldIndex[typ] = cache
+				cacheStructFieldIndex[typ] = cache
 			}
-			cachedStructsMutex.Unlock()
+			cacheStructMutex.Unlock()
 		}
 		if id, ok := cache[key]; ok {
 			return v.FieldByIndex(id)
